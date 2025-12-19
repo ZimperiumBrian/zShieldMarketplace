@@ -1,0 +1,69 @@
+name: "Zimperium zShield Pro"
+description: "Protect mobile applications with zShield Pro and download the protected build"
+author: "Zimperium"
+
+inputs:
+  console_url:
+    description: "Zimperium console URL (e.g. https://zc202.zimperium.com). Optional if client_env is set."
+    required: false
+
+  client_env:
+    description: "Zimperium environment (e.g. zc202). Optional if console_url is set."
+    required: false
+
+  client_id:
+    description: "Zimperium API client ID"
+    required: true
+
+  client_secret:
+    description: "Zimperium API client secret"
+    required: true
+
+  app_file:
+    description: "Path or glob pattern to the mobile app binary (APK/AAB/IPA)"
+    required: true
+
+  team_name:
+    description: "Target team name (resolved automatically)"
+    required: true
+
+  group_name:
+    description: "Policy group name (team-scoped groups take precedence over global groups)"
+    required: true
+
+  app_protection_request:
+    description: "Inline JSON string defining zShield Pro protection settings"
+    required: false
+
+  app_protection_request_file:
+    description: "Path to JSON file defining zShield Pro protection settings"
+    required: false
+
+  timeout_minutes:
+    description: "Maximum time to wait for protection to complete (default: 60)"
+    required: false
+    default: "60"
+
+  poll_interval_seconds:
+    description: "Polling interval for protection status (default: 15)"
+    required: false
+    default: "15"
+
+  output_file:
+    description: "Optional output filename for the protected app"
+    required: false
+
+outputs:
+  build_id:
+    description: "zShield Pro build ID"
+
+  protected_file:
+    description: "Path to the downloaded protected application"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
+
+branding:
+  icon: "shield"
+  color: "blue"
