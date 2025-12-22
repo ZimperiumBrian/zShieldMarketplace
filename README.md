@@ -2,7 +2,7 @@
 
 ## Mobile Application Protection and Hardening
 
-The **Zimperium zShield Pro GitHub Action** protects your mobile application binary (Android APK/AAB or iOS IPA) using **zShield Pro**.
+The **Zimperium zShield Pro GitHub Action** protects your mobile application binary (Android APK/AAB or iOS IPA) using **zShield Pro**.  
 It applies advanced security hardening techniques—such as encryption and runtime protections—and downloads the **protected build** for further use in your CI/CD pipeline.
 
 ---
@@ -14,7 +14,6 @@ It applies advanced security hardening techniques—such as encryption and runti
 * Resolve **team** and **policy group** by name (no UUIDs required)
 * Support for **team-scoped and global policy groups**
 * Download the protected application artifact for:
-
   * Re-signing
   * Distribution
   * Additional scanning (e.g., zScan)
@@ -31,11 +30,11 @@ You must provide the full base URL of your Zimperium tenant using `console_url`.
 
 Examples:
 
-* [https://zc202.zimperium.com](https://zc202.zimperium.com)
-* [https://ziap.zimperium.com](https://ziap.zimperium.com)
-* [https://mtd.example.com](https://mtd.example.com)
+* `https://zc202.zimperium.com`
+* `https://ziap.zimperium.com`
+* `https://mtd.example.com`
 
-Do not include a trailing slash.
+Do **not** include a trailing slash.
 
 ```yaml
 - name: Protect App with zShield Pro
@@ -43,14 +42,14 @@ Do not include a trailing slash.
   timeout-minutes: 60
   with:
     console_url: https://ziap.zimperium.com
-    client_id: <Paste CLIENT_ID here or use a GitHub variable>
-    client_secret: ${{ secrets.ZSHIELD_CLIENT_SECRET }}
+    client_id: ${{ vars.Z_CLIENT_ID }}
+    client_secret: ${{ secrets.Z_CLIENT_SECRET }}
     app_file: ./app-release.apk
     team_name: Apps
-    group_name: newfindme
+    group_name: Default Group
 ```
 
-The protected app will be downloaded to the GitHub Actions workspace and exposed as an output.
+The protected app is downloaded to the GitHub Actions workspace and exposed as an output.
 
 ---
 
@@ -78,7 +77,6 @@ You can upload the protected artifact using `actions/upload-artifact`:
 * This action must run on an **ubuntu-latest** GitHub Actions runner
 * No GitHub Advanced Security (GHAS) license is required
 * For Android:
-
   * The protected APK **must be re-signed** before installation or distribution
 
 ---
@@ -94,23 +92,20 @@ You can upload the protected artifact using `actions/upload-artifact`:
 5. Enter a description.
 6. Grant required permissions for zShield Pro.
 7. Save and copy:
-
    * **Client ID**
    * **Client Secret**
 
 ---
 
-### Step 2 – Add Secrets to GitHub
+### Step 2 – Add Secrets and Variables to GitHub
 
 1. In your GitHub repository, go to **Settings**.
 2. Navigate to **Secrets and Variables → Actions**.
-3. Click **New repository secret**.
-4. Add:
+3. Add:
+   * `Z_CLIENT_ID` (repository variable)
+   * `Z_CLIENT_SECRET` (repository secret)
 
-   * `ZSHIELD_CLIENT_SECRET` → your client secret
-5. (Optional) Add `ZSHIELD_CLIENT_ID` as a repository variable.
-
-For more details, see the
+For more details, see the  
 [GitHub Secrets documentation](https://docs.github.com/en/actions/security-guides/encrypted-secrets).
 
 ---
@@ -124,22 +119,102 @@ For more details, see the
 
 ---
 
+## Protection Policy Configuration
+
+### Default Behavior
+
+If no protection policy is provided, the action applies a **default CI-safe policy**, equivalent to:
+
+```json
+{
+  "description": "CI zShield Pro protection",
+  "signatureVerification": false,
+  "staticDexEncryption": true,
+  "resourceEncryption": true,
+  "metadataEncryption": true,
+  "codeObfuscation": false,
+  "runtimeProtection": true,
+  "autoScanBuild": true
+}
+```
+
+This default is suitable for most CI and demo workflows.
+
+---
+
+### Inline Policy Override (Recommended for Demos)
+
+You may override the default policy inline using `app_protection_request`:
+
+```yaml
+- name: Protect with zShield Pro
+  uses: zimperium/zshield-pro-action@v0.1.0
+  with:
+    console_url: https://zc202.zimperium.com
+    client_id: ${{ vars.Z_CLIENT_ID }}
+    client_secret: ${{ secrets.Z_CLIENT_SECRET }}
+    app_file: app-release.apk
+    team_name: Apps
+    group_name: Default Group
+    app_protection_request: |
+      {
+        "description": "Demo CI policy",
+        "runtimeProtection": true,
+        "autoScanBuild": true
+      }
+```
+
+Inline JSON is ideal for demos and quick experimentation.
+
+---
+
+### File-Based Policy Override (Recommended for Production)
+
+For larger or platform-specific policies, use a file:
+
+```yaml
+- name: Protect with zShield Pro
+  uses: zimperium/zshield-pro-action@v0.1.0
+  with:
+    console_url: https://zc202.zimperium.com
+    client_id: ${{ vars.Z_CLIENT_ID }}
+    client_secret: ${{ secrets.Z_CLIENT_SECRET }}
+    app_file: app-release.apk
+    team_name: Apps
+    group_name: Default Group
+    app_protection_request_file: .github/zshield-policy.json
+```
+
+This approach is recommended for production pipelines and complex configurations.
+
+---
+
+### Policy Precedence
+
+Protection policies are applied using the following order:
+
+1. `app_protection_request` (inline JSON)
+2. `app_protection_request_file`
+3. Built-in default policy
+
+---
+
 ## Policy Group Resolution Behavior
 
-Policy groups are resolved using the following rules:
+Policy groups are resolved deterministically:
 
-1. If a **team-scoped group** matches the provided `group_name`, it is selected.
+1. A **team-scoped group** matching `group_name` is selected first.
 2. Otherwise, a **global group** with the same name is selected.
 3. If multiple matches exist, the action fails with a clear error.
 4. If no match is found, the action fails.
 
-This ensures deterministic and safe policy application.
+This ensures safe and predictable policy application.
 
 ---
 
 ## Adding zShield Pro to an Existing Workflow
 
-You can add this action to any existing build pipeline after your mobile app is built.
+You can add this action to any existing build pipeline after your mobile app is built:
 
 ```yaml
 - name: Build Android App
@@ -149,8 +224,8 @@ You can add this action to any existing build pipeline after your mobile app is 
   uses: zimperium/zshield-pro-action@v0.1.0
   with:
     console_url: https://zc202.zimperium.com
-    client_id: ${{ vars.ZSHIELD_CLIENT_ID }}
-    client_secret: ${{ secrets.ZSHIELD_CLIENT_SECRET }}
+    client_id: ${{ vars.Z_CLIENT_ID }}
+    client_secret: ${{ secrets.Z_CLIENT_SECRET }}
     app_file: app/build/outputs/apk/release/app-release.apk
     team_name: Apps
     group_name: Default Group
@@ -160,8 +235,7 @@ You can add this action to any existing build pipeline after your mobile app is 
 
 ## If You Run Into Issues
 
-Please file issues in the repository where this action is hosted.
-Include:
+Please file issues in the repository where this action is hosted. Include:
 
 * The workflow snippet
 * The error message
@@ -191,5 +265,5 @@ furnished to do so, subject to the following conditions:
 
 ## Enhancements
 
-Improvements and pull requests are welcome.
+Improvements and pull requests are welcome.  
 This action is intentionally designed to evolve alongside the zShield Pro API.
