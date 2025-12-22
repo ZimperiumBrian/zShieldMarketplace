@@ -4,12 +4,8 @@ author: "Zimperium"
 
 inputs:
   console_url:
-    description: "Zimperium console URL (e.g. https://zc202.zimperium.com). Optional if client_env is set."
-    required: false
-
-  client_env:
-    description: "Zimperium environment (e.g. zc202). Optional if console_url is set."
-    required: false
+    description: "Full base URL of your Zimperium tenant (e.g. https://zc202.zimperium.com, https://ziap.zimperium.com, https://mtd.example.com)"
+    required: true
 
   client_id:
     description: "Zimperium API client ID"

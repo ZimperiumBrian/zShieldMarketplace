@@ -8,8 +8,7 @@ const FormData = require('form-data');
 /* =========================
  * Inputs
  * ========================= */
-const clientEnv = core.getInput('client_env', { required: false });
-const consoleUrl = core.getInput('console_url', { required: false });
+const consoleUrl = core.getInput('console_url', { required: true });
 const clientId = core.getInput('client_id', { required: true });
 const clientSecret = core.getInput('client_secret', { required: true });
 const appFilePattern = core.getInput('app_file', { required: true });
@@ -25,6 +24,21 @@ const pollIntervalSeconds = parseInt(core.getInput('poll_interval_seconds') || '
 const outputFileInput = core.getInput('output_file', { required: false });
 
 /* =========================
+ * Base URL normalization
+ * ========================= */
+let baseUrl = consoleUrl;
+
+if (!/^https?:\/\//i.test(baseUrl)) {
+  throw new Error(`console_url must include scheme (https://...). Got: ${baseUrl}`);
+}
+
+if (baseUrl.endsWith('/')) {
+  baseUrl = baseUrl.slice(0, -1);
+}
+
+core.debug(`Base URL: ${baseUrl}`);
+
+/* =========================
  * Constants
  * ========================= */
 const STATUS_POLL_TIME = pollIntervalSeconds * 1000;
@@ -32,10 +46,6 @@ const MAX_POLL_TIME = timeoutMinutes * 60 * 1000;
 const MAX_FILES = 5;
 
 let loginResponse;
-let baseUrl = consoleUrl ? consoleUrl : `https://${clientEnv}.zimperium.com`;
-if (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
-
-core.debug(`Base URL: ${baseUrl}`);
 
 /* =========================
  * Auth (mirrors zScan)
@@ -146,9 +156,7 @@ async function resolveGroupId(groupName, teamId) {
     return teamScoped[0].id;
   }
   if (teamScoped.length > 1) {
-    throw new Error(
-      `Group "${groupName}" is ambiguous within team ${teamId}.`
-    );
+    throw new Error(`Group "${groupName}" is ambiguous within team ${teamId}.`);
   }
 
   const global = matches.filter(g => !g.team);
@@ -160,9 +168,7 @@ async function resolveGroupId(groupName, teamId) {
     throw new Error(`Multiple global groups named "${groupName}" found.`);
   }
 
-  throw new Error(
-    `Group "${groupName}" exists but is not accessible for team ${teamId}.`
-  );
+  throw new Error(`Group "${groupName}" exists but is not accessible for team ${teamId}.`);
 }
 
 /* =========================
@@ -267,8 +273,7 @@ async function downloadProtected(url, inputFile) {
   });
 
   const baseName = path.basename(inputFile, path.extname(inputFile));
-  const outPath =
-    outputFileInput || `${baseName}_zshield_protected.apk`;
+  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
 
   fs.writeFileSync(outPath, Buffer.from(resp.data));
   core.info(`Protected file downloaded: ${outPath}`);
