@@ -318,3 +318,4 @@ async function downloadProtected(url, inputFile) {
     core.setFailed(err.message);
   }
 })();
+
