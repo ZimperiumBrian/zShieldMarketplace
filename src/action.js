@@ -328,32 +328,43 @@ async function getProtectedLink(buildId) {
 }
 
 async function downloadFromSignedUrl(signedUrl, inputFile) {
+  const baseName = path.basename(inputFile, path.extname(inputFile));
+  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
+
   const resp = await axios.get(signedUrl, {
     responseType: 'arraybuffer',
-    // Signed URL should not require Bearer auth; omit it to avoid odd proxy behaviors.
+    maxRedirects: 5,     // curl -L behavior
+    proxy: false,        // avoid GH runner proxy weirdness
+    headers: {
+      Accept: 'application/octet-stream'
+    },
     validateStatus: () => true
   });
 
+  const ct = String(resp.headers?.['content-type'] || '');
+
   if (resp.status < 200 || resp.status >= 300) {
-    const head = Buffer.from(resp.data).slice(0, 300).toString('utf8');
-    throw new Error(`Signed URL download failed HTTP ${resp.status}. First bytes:\n${head}`);
+    const head = Buffer.from(resp.data || []).slice(0, 500).toString('utf8');
+    throw new Error(`Signed URL download failed HTTP ${resp.status} content-type="${ct}". First bytes:\n${head}`);
+  }
+
+  if (ct.includes('text/html')) {
+    const head = Buffer.from(resp.data || []).slice(0, 1000).toString('utf8');
+    throw new Error(`Signed URL returned HTML (not APK). First bytes:\n${head}`);
   }
 
   const data = Buffer.from(resp.data);
 
-  // APKs are ZIPs: must start with "PK"
+  // APK is a ZIP, should start with "PK"
   if (data.length < 4 || data[0] !== 0x50 || data[1] !== 0x4B) {
     const head = data.slice(0, 500).toString('utf8');
-    throw new Error(`Downloaded file is not APK/ZIP. Size=${data.length}. First bytes:\n${head}`);
+    throw new Error(`Downloaded file is not APK/ZIP. content-type="${ct}" size=${data.length}. First bytes:\n${head}`);
   }
 
-  const baseName = path.basename(inputFile, path.extname(inputFile));
-  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
   fs.writeFileSync(outPath, data);
   core.info(`Protected APK downloaded OK: ${outPath} (${data.length} bytes)`);
   return outPath;
 }
-
 
 /* =========================
  * Main
