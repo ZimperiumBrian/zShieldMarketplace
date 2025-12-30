@@ -1,3 +1,4 @@
+// action.js
 const axios = require('axios');
 const core = require('@actions/core');
 const fs = require('fs');
@@ -73,7 +74,6 @@ function formatAxiosError(err) {
     const statusText = err.response.statusText || '';
     let body = err.response.data;
 
-    // Try to make response readable (avoid dumping raw buffers)
     if (Buffer.isBuffer(body)) {
       body = body.toString('utf8');
     }
@@ -88,6 +88,29 @@ function formatAxiosError(err) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function safeUrlSummary(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const p = u.pathname || '';
+    // Don’t print the query (contains signature). Print a truncated path.
+    return `host="${u.host}" path="${p.slice(0, 120)}${p.length > 120 ? '...' : ''}"`;
+  } catch (_) {
+    return 'host="<invalid>" path="<invalid>"';
+  }
+}
+
+async function readStreamSnippet(stream, maxBytes = 1200) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(b);
+    total += b.length;
+    if (total >= maxBytes) break;
+  }
+  return Buffer.concat(chunks).slice(0, maxBytes).toString('utf8');
 }
 
 /* =========================
@@ -224,7 +247,7 @@ function buildProtectionRequest(teamId, groupId) {
   let req;
 
   if (protectionJsonFile) {
-    req = JSON.parse(fs.readFileSync(protectionJsonFile, 'utf8'));
+    req = JSON.parse(fs.readFileSync(ensureAbsoluteWorkspacePath(protectionJsonFile), 'utf8'));
   } else if (protectionJsonInline) {
     req = JSON.parse(protectionJsonInline);
   } else {
@@ -331,38 +354,64 @@ async function downloadFromSignedUrl(signedUrl, inputFile) {
   const baseName = path.basename(inputFile, path.extname(inputFile));
   const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
 
+  core.info(`Downloading protected artifact to ${outPath}...`);
+  core.info(`Signed URL (sanitized): ${safeUrlSummary(signedUrl)}`);
+
   const resp = await axios.get(signedUrl, {
-    responseType: 'arraybuffer',
-    maxRedirects: 5,     // curl -L behavior
-    proxy: false,        // avoid GH runner proxy weirdness
-    headers: {
-      Accept: 'application/octet-stream'
-    },
+    responseType: 'stream',
+    maxRedirects: 10, // behave like curl -L
+    proxy: false,     // avoid runner proxy rewriting signed URL traffic
+    headers: { Accept: '*/*' },
     validateStatus: () => true
   });
 
   const ct = String(resp.headers?.['content-type'] || '');
+  const cl = String(resp.headers?.['content-length'] || '');
+  const finalUrl = resp.request?.res?.responseUrl || signedUrl;
 
+  core.info(`Download response: status=${resp.status} content-type="${ct}" content-length="${cl}"`);
+  core.info(`Final URL (sanitized): ${safeUrlSummary(finalUrl)}`);
+
+  // Fail and surface body snippet on non-2xx
   if (resp.status < 200 || resp.status >= 300) {
-    const head = Buffer.from(resp.data || []).slice(0, 500).toString('utf8');
-    throw new Error(`Signed URL download failed HTTP ${resp.status} content-type="${ct}". First bytes:\n${head}`);
+    const snippet = await readStreamSnippet(resp.data, 1600);
+    throw new Error(`Signed URL download failed HTTP ${resp.status}. Body starts:\n${snippet}`);
   }
 
-  if (ct.includes('text/html')) {
-    const head = Buffer.from(resp.data || []).slice(0, 1000).toString('utf8');
-    throw new Error(`Signed URL returned HTML (not APK). First bytes:\n${head}`);
+  // If server says it's HTML/XML, surface it
+  if (ct.includes('text/html') || ct.includes('application/xml') || ct.includes('text/xml')) {
+    const snippet = await readStreamSnippet(resp.data, 1600);
+    throw new Error(`Signed URL returned ${ct}, not APK. Body starts:\n${snippet}`);
   }
 
-  const data = Buffer.from(resp.data);
+  // Stream to disk
+  await new Promise((resolve, reject) => {
+    const writer = fs.createWriteStream(outPath);
+    resp.data.pipe(writer);
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
 
-  // APK is a ZIP, should start with "PK"
-  if (data.length < 4 || data[0] !== 0x50 || data[1] !== 0x4B) {
-    const head = data.slice(0, 500).toString('utf8');
-    throw new Error(`Downloaded file is not APK/ZIP. content-type="${ct}" size=${data.length}. First bytes:\n${head}`);
+  const stats = fs.statSync(outPath);
+  core.info(`Download complete: ${outPath} (${stats.size} bytes)`);
+
+  // Minimal sanity: APK is ZIP => "PK" magic
+  const fd = fs.openSync(outPath, 'r');
+  const magic = Buffer.alloc(2);
+  fs.readSync(fd, magic, 0, 2, 0);
+  fs.closeSync(fd);
+
+  if (!(magic[0] === 0x50 && magic[1] === 0x4B)) {
+    const head = fs.readFileSync(outPath).slice(0, 800).toString('utf8');
+    throw new Error(`Downloaded file is not ZIP/APK (missing PK). First bytes:\n${head}`);
   }
 
-  fs.writeFileSync(outPath, data);
-  core.info(`Protected APK downloaded OK: ${outPath} (${data.length} bytes)`);
+  // If still tiny, dump first bytes (likely an error wrapper)
+  if (stats.size < 10000) {
+    const head = fs.readFileSync(outPath).slice(0, 1200).toString('utf8');
+    throw new Error(`Downloaded file is unexpectedly small (${stats.size} bytes). First bytes:\n${head}`);
+  }
+
   return outPath;
 }
 
@@ -402,6 +451,15 @@ async function run() {
 
   // Per API docs: must fetch signed download URL explicitly
   const link = await getProtectedLink(buildId);
+
+  // Prove what URL we got (without leaking the signature)
+  core.info(`Protected artifact name: "${link.name || ''}"`);
+  core.info(`Protected artifact signed URL: ${safeUrlSummary(link.url)}`);
+
+  // Optional: expose the signed URL as an output (be careful—contains signature)
+  // If you enable this, consider masking it or only using internally.
+  core.setOutput('protected_url', link.url);
+  core.setSecret(link.url);
 
   // Download the actual APK from the signed URL
   const protectedPath = await downloadFromSignedUrl(link.url, file);
