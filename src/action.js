@@ -312,33 +312,30 @@ async function downloadProtected(buildId, inputFile) {
   const auth = await loginHttpRequest();
 
   const url = `${baseUrl}/api/zapp/public/v1/builds/${buildId}/protected`;
-
-  core.info(`Downloading protected APK via API: ${url}`);
+  core.info(`Attempting protected download via: ${url}`);
 
   const resp = await axios.get(url, {
     headers: {
       Authorization: `Bearer ${auth.accessToken}`
     },
-    responseType: 'arraybuffer'
+    responseType: 'arraybuffer',
+    validateStatus: () => true
   });
 
+  core.info(`Download HTTP status: ${resp.status}`);
+  core.info(`Content-Type: ${resp.headers['content-type']}`);
+  core.info(`Content-Length: ${resp.headers['content-length']}`);
+
   const data = Buffer.from(resp.data);
+  const head = data.slice(0, 256).toString('utf8');
 
-  // APK sanity check (ZIP magic)
-  if (!(data[0] === 0x50 && data[1] === 0x4B)) {
-    const head = data.slice(0, 512).toString('utf8');
-    throw new Error(`Expected APK ZIP, got:\n${head}`);
-  }
+  core.info(`First 256 bytes:\n${head}`);
 
-  const baseName = path.basename(inputFile, path.extname(inputFile));
-  const outPath = path.resolve(
-    process.env.GITHUB_WORKSPACE,
-    `${baseName}_zshield_protected.apk`
+  throw new Error(
+    'Stopping here intentionally: protected endpoint did not return binary'
   );
-
-  fs.writeFileSync(outPath, data);
-  return outPath;
 }
+
 
 /* =========================
  * Main
