@@ -308,25 +308,37 @@ async function pollUntilProtected(buildId) {
 /* =========================
  * Download protected file
  * ========================= */
-async function downloadProtected(protectedUrl, inputFile) {
-  // IMPORTANT:
-  // - No Authorization header
-  // - Must allow redirects
-  const resp = await axios.get(protectedUrl, {
-    responseType: 'arraybuffer',
-    maxRedirects: 5,
-    validateStatus: status => status >= 200 && status < 400
+async function downloadProtected(buildId, inputFile) {
+  const auth = await loginHttpRequest();
+
+  const url = `${baseUrl}/api/zapp/public/v1/builds/${buildId}/protected`;
+
+  core.info(`Downloading protected APK via API: ${url}`);
+
+  const resp = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${auth.accessToken}`
+    },
+    responseType: 'arraybuffer'
   });
 
+  const data = Buffer.from(resp.data);
+
+  // APK sanity check (ZIP magic)
+  if (!(data[0] === 0x50 && data[1] === 0x4B)) {
+    const head = data.slice(0, 512).toString('utf8');
+    throw new Error(`Expected APK ZIP, got:\n${head}`);
+  }
+
   const baseName = path.basename(inputFile, path.extname(inputFile));
-  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
+  const outPath = path.resolve(
+    process.env.GITHUB_WORKSPACE,
+    `${baseName}_zshield_protected.apk`
+  );
 
-  fs.writeFileSync(outPath, Buffer.from(resp.data));
-
-  core.info(`Protected file downloaded: ${outPath}`);
+  fs.writeFileSync(outPath, data);
   return outPath;
 }
-
 
 /* =========================
  * Main
