@@ -308,32 +308,50 @@ async function pollUntilProtected(buildId) {
 /* =========================
  * Download protected file
  * ========================= */
-async function downloadProtected(buildId, inputFile) {
+async function getProtectedLink(buildId) {
   const auth = await loginHttpRequest();
-
   const url = `${baseUrl}/api/zapp/public/v1/builds/${buildId}/protected`;
-  core.info(`Attempting protected download via: ${url}`);
 
   const resp = await axios.get(url, {
     headers: {
-      Authorization: `Bearer ${auth.accessToken}`
-    },
+      Authorization: `Bearer ${auth.accessToken}`,
+      Accept: 'application/json'
+    }
+  });
+
+  // Expect { name, url }
+  if (!resp.data || !resp.data.url) {
+    throw new Error(`Unexpected /protected response: ${JSON.stringify(resp.data)}`);
+  }
+
+  return resp.data; // { name, url }
+}
+
+async function downloadFromSignedUrl(signedUrl, inputFile) {
+  const resp = await axios.get(signedUrl, {
     responseType: 'arraybuffer',
+    // Signed URL should not require Bearer auth; omit it to avoid odd proxy behaviors.
     validateStatus: () => true
   });
 
-  core.info(`Download HTTP status: ${resp.status}`);
-  core.info(`Content-Type: ${resp.headers['content-type']}`);
-  core.info(`Content-Length: ${resp.headers['content-length']}`);
+  if (resp.status < 200 || resp.status >= 300) {
+    const head = Buffer.from(resp.data).slice(0, 300).toString('utf8');
+    throw new Error(`Signed URL download failed HTTP ${resp.status}. First bytes:\n${head}`);
+  }
 
   const data = Buffer.from(resp.data);
-  const head = data.slice(0, 256).toString('utf8');
 
-  core.info(`First 256 bytes:\n${head}`);
+  // APKs are ZIPs: must start with "PK"
+  if (data.length < 4 || data[0] !== 0x50 || data[1] !== 0x4B) {
+    const head = data.slice(0, 500).toString('utf8');
+    throw new Error(`Downloaded file is not APK/ZIP. Size=${data.length}. First bytes:\n${head}`);
+  }
 
-  throw new Error(
-    'Stopping here intentionally: protected endpoint did not return binary'
-  );
+  const baseName = path.basename(inputFile, path.extname(inputFile));
+  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
+  fs.writeFileSync(outPath, data);
+  core.info(`Protected APK downloaded OK: ${outPath} (${data.length} bytes)`);
+  return outPath;
 }
 
 
@@ -369,13 +387,14 @@ async function run() {
 
   core.setOutput('build_id', String(buildId));
 
-  const completed = await pollUntilProtected(buildId);
+  await pollUntilProtected(buildId);
 
-  if (!completed.protectedUrl) {
-    throw new Error(`Build completed without protectedUrl: ${JSON.stringify(completed)}`);
-  }
+  // Per API docs: must fetch signed download URL explicitly
+  const link = await getProtectedLink(buildId);
 
-  const protectedPath = await downloadProtected(completed.protectedUrl, file);
+  // Download the actual APK from the signed URL
+  const protectedPath = await downloadFromSignedUrl(link.url, file);
+
   core.setOutput('protected_file', protectedPath);
 
   core.info('zShield Pro Action Finished');
