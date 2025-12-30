@@ -308,28 +308,25 @@ async function pollUntilProtected(buildId) {
 /* =========================
  * Download protected file
  * ========================= */
-async function downloadProtected(url, inputFile) {
-  const auth = await loginHttpRequest();
-
-  // Some APIs may return a relative URL; normalize to absolute
-  const finalUrl = /^https?:\/\//i.test(url) ? url : `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
-
-  const resp = await axios.get(finalUrl, {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
-    responseType: 'arraybuffer'
+async function downloadProtected(protectedUrl, inputFile) {
+  // IMPORTANT:
+  // - No Authorization header
+  // - Must allow redirects
+  const resp = await axios.get(protectedUrl, {
+    responseType: 'arraybuffer',
+    maxRedirects: 5,
+    validateStatus: status => status >= 200 && status < 400
   });
 
   const baseName = path.basename(inputFile, path.extname(inputFile));
-
-  // Default output in workspace root
-  const defaultName = `${baseName}_zshield_protected.apk`;
-  const outPath = ensureAbsoluteWorkspacePath(outputFileInput || defaultName);
+  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
 
   fs.writeFileSync(outPath, Buffer.from(resp.data));
-  core.info(`Protected file downloaded: ${outPath}`);
 
+  core.info(`Protected file downloaded: ${outPath}`);
   return outPath;
 }
+
 
 /* =========================
  * Main
