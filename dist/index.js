@@ -44457,8 +44457,13 @@ const clientId = core.getInput('client_id', { required: true });
 const clientSecret = core.getInput('client_secret', { required: true });
 const appFilePattern = core.getInput('app_file', { required: true });
 
-const teamName = core.getInput('team_name', { required: true });
-const groupName = core.getInput('group_name', { required: true });
+// Default to Default/Default Group unless explicitly overridden
+const teamName = core.getInput('team_name', { required: false }) || 'Default';
+const groupName = core.getInput('group_name', { required: false }) || 'Default Group';
+
+// Optional direct ID overrides (skip lookups; useful for CI stability)
+const teamIdOverride = core.getInput('team_id', { required: false });
+const groupIdOverride = core.getInput('group_id', { required: false });
 
 const protectionJsonInline = core.getInput('app_protection_request', { required: false });
 const protectionJsonFile = core.getInput('app_protection_request_file', { required: false });
@@ -44505,7 +44510,6 @@ function base64UrlDecodeToJson(b64url) {
   return JSON.parse(Buffer.from(normalized, 'base64').toString('utf8'));
 }
 
-// Less-leaky URL summary: host + first path segment only (no query/signature)
 function safeUrlSummary(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -44518,7 +44522,7 @@ function safeUrlSummary(rawUrl) {
 }
 
 function sanitizeFilename(name, fallback) {
-  const base = (name || '').trim().replace(/^.*[\\/]/, ''); // drop any path
+  const base = (name || '').trim().replace(/^.*[\\/]/, '');
   const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_');
   return cleaned || fallback;
 }
@@ -44734,8 +44738,9 @@ async function getProtectedLink(buildId) {
 async function downloadFromSignedUrl(signedUrl, inputFile, serverName) {
   const baseName = path.basename(inputFile, path.extname(inputFile));
   const fallback = `${baseName}_zshield_protected.apk`;
-  const finalName = sanitizeFilename(serverName, fallback);
-  const outPath = outputFileInput ? sanitizeFilename(outputFileInput, fallback) : finalName;
+  const outPath = outputFileInput
+    ? sanitizeFilename(outputFileInput, fallback)
+    : sanitizeFilename(serverName, fallback);
 
   core.info(`Downloading protected artifact to ${outPath}...`);
   core.info(`Signed URL (sanitized): ${safeUrlSummary(signedUrl)}`);
@@ -44760,7 +44765,6 @@ async function downloadFromSignedUrl(signedUrl, inputFile, serverName) {
     throw new Error(`Signed URL download failed HTTP ${resp.status}. Body starts:\n${snippet}`);
   }
 
-  // Content-type can be octet-stream for APK; only hard-fail on obvious markup.
   if (ct.includes('text/html') || ct.includes('application/xml') || ct.includes('text/xml')) {
     const snippet = await readStreamSnippet(resp.data);
     throw new Error(`Signed URL returned ${ct}, not APK. Body starts:\n${snippet}`);
@@ -44776,7 +44780,6 @@ async function downloadFromSignedUrl(signedUrl, inputFile, serverName) {
   const stats = fs.statSync(outPath);
   core.info(`Download complete: ${outPath} (${stats.size} bytes)`);
 
-  // APK is ZIP => "PK"
   const fd = fs.openSync(outPath, 'r');
   const magic = Buffer.alloc(2);
   fs.readSync(fd, magic, 0, 2, 0);
@@ -44800,37 +44803,38 @@ async function downloadFromSignedUrl(signedUrl, inputFile, serverName) {
 async function run() {
   core.debug(`Base URL: ${baseUrl}`);
   core.debug(`app pattern: ${appFilePattern}`);
-  core.debug(`team: ${teamName}`);
-  core.debug(`group: ${groupName}`);
+  core.debug(`team_name: ${teamName}`);
+  core.debug(`group_name: ${groupName}`);
+  if (teamIdOverride) core.debug(`team_id override present`);
+  if (groupIdOverride) core.debug(`group_id override present`);
 
   const files = await getMatchingFiles(appFilePattern);
   if (files.length !== 1) {
     throw new Error(`app_file must resolve to exactly 1 file for zShield Pro. Matched: ${files.join(', ')}`);
   }
-
   const file = files[0];
 
-  const teamId = await resolveTeamId(teamName);
-  const groupId = await resolveGroupId(groupName, teamId);
+  // Default behavior: Default team + Default Group unless team/group are provided.
+  const teamId = teamIdOverride ? teamIdOverride : await resolveTeamId(teamName);
+  const groupId = groupIdOverride ? groupIdOverride : await resolveGroupId(groupName, teamId);
 
   core.info(`Submitting protection job for ${file}`);
+  core.info(`Using team="${teamName}" group="${groupName}"`);
 
   const protectionRequest = buildProtectionRequest(teamId, groupId);
   const submitResp = await submitProtect(file, protectionRequest);
 
   const buildId = submitResp.buildId;
   if (!buildId) throw new Error(`Protect response missing buildId: ${JSON.stringify(submitResp)}`);
-
   core.setOutput('build_id', String(buildId));
 
   await pollUntilReady(buildId);
 
   const link = await getProtectedLink(buildId);
-
   core.info(`Protected artifact name: "${link.name || ''}"`);
   core.info(`Protected artifact signed URL: ${safeUrlSummary(link.url)}`);
 
-  // Output: contains temporary signature; don't log it.
+  // NOTE: signed URL includes temporary signature; never print it.
   core.setSecret(link.url);
   core.setOutput('protected_url', link.url);
 
