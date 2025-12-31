@@ -4,7 +4,7 @@ author: "Zimperium"
 
 inputs:
   console_url:
-    description: "Full base URL of your Zimperium tenant (e.g. https://zc202.zimperium.com, https://ziap.zimperium.com, https://mtd.example.com)"
+    description: "Full base URL of your Zimperium tenant (e.g. https://zc202.zimperium.com, https://ziap.zimperium.com)"
     required: true
 
   client_id:
@@ -55,6 +55,9 @@ outputs:
 
   protected_file:
     description: "Path to the downloaded protected application"
+
+  protected_url:
+    description: "Signed URL for downloading the protected application (contains temporary signature)"
 
 runs:
   using: "node20"
