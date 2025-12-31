@@ -44441,7 +44441,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"application/1d-interleaved-parityfec
 /******/ 	
 /************************************************************************/
 var __webpack_exports__ = {};
-// action.js
+// src/action.js
 const axios = __nccwpck_require__(7269);
 const core = __nccwpck_require__(7484);
 const fs = __nccwpck_require__(9896);
@@ -44471,43 +44471,56 @@ const outputFileInput = core.getInput('output_file', { required: false });
  * Base URL normalization
  * ========================= */
 let baseUrl = consoleUrl;
-
 if (!/^https?:\/\//i.test(baseUrl)) {
   throw new Error(`console_url must include scheme (https://...). Got: ${baseUrl}`);
 }
-
-if (baseUrl.endsWith('/')) {
-  baseUrl = baseUrl.slice(0, -1);
-}
-
-core.debug(`Base URL: ${baseUrl}`);
+if (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
 
 /* =========================
  * Constants
  * ========================= */
 const STATUS_POLL_TIME = pollIntervalSeconds * 1000;
 const MAX_POLL_TIME = timeoutMinutes * 60 * 1000;
-const MAX_FILES = 5; // enforced by getMatchingFiles()
+const MAX_FILES = 5;
 
 let loginResponse;
 
 /* =========================
- * Helpers
+ * Small helpers
  * ========================= */
-function base64UrlDecodeToJson(b64url) {
-  // JWT payload is base64url; normalize to base64
-  const normalized = b64url.replace(/-/g, '+').replace(/_/g, '/')
-    .padEnd(Math.ceil(b64url.length / 4) * 4, '=');
-
-  const jsonStr = Buffer.from(normalized, 'base64').toString('utf8');
-  return JSON.parse(jsonStr);
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-function ensureAbsoluteWorkspacePath(p) {
+function ensureAbs(p) {
   if (!p) return p;
   if (path.isAbsolute(p)) return p;
   const ws = process.env.GITHUB_WORKSPACE || process.cwd();
   return path.join(ws, p);
+}
+
+function base64UrlDecodeToJson(b64url) {
+  const normalized = b64url.replace(/-/g, '+').replace(/_/g, '/')
+    .padEnd(Math.ceil(b64url.length / 4) * 4, '=');
+  return JSON.parse(Buffer.from(normalized, 'base64').toString('utf8'));
+}
+
+// Less-leaky URL summary: host + first path segment only (no query/signature)
+function safeUrlSummary(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const parts = (u.pathname || '').split('/').filter(Boolean);
+    const shortPath = parts.length ? `/${parts[0]}/...` : '/';
+    return `host="${u.host}" path="${shortPath}"`;
+  } catch (_) {
+    return 'host="<invalid>" path="<invalid>"';
+  }
+}
+
+function sanitizeFilename(name, fallback) {
+  const base = (name || '').trim().replace(/^.*[\\/]/, ''); // drop any path
+  const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_');
+  return cleaned || fallback;
 }
 
 function formatAxiosError(err) {
@@ -44516,35 +44529,16 @@ function formatAxiosError(err) {
     const status = err.response.status;
     const statusText = err.response.statusText || '';
     let body = err.response.data;
-
-    if (Buffer.isBuffer(body)) {
-      body = body.toString('utf8');
-    }
+    if (Buffer.isBuffer(body)) body = body.toString('utf8');
     if (typeof body === 'object') {
       try { body = JSON.stringify(body); } catch (_) {}
     }
-
     return `HTTP ${status} ${statusText} - ${body}`;
   }
   return err.message ? err.message : String(err);
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function safeUrlSummary(rawUrl) {
-  try {
-    const u = new URL(rawUrl);
-    const p = u.pathname || '';
-    // Don’t print the query (contains signature). Print a truncated path.
-    return `host="${u.host}" path="${p.slice(0, 120)}${p.length > 120 ? '...' : ''}"`;
-  } catch (_) {
-    return 'host="<invalid>" path="<invalid>"';
-  }
-}
-
-async function readStreamSnippet(stream, maxBytes = 1200) {
+async function readStreamSnippet(stream, maxBytes = 1600) {
   const chunks = [];
   let total = 0;
   for await (const chunk of stream) {
@@ -44557,140 +44551,110 @@ async function readStreamSnippet(stream, maxBytes = 1200) {
 }
 
 /* =========================
- * Auth (mirrors zScan)
+ * Auth (token cached until exp)
  * ========================= */
 async function loginHttpRequest() {
-  core.setSecret(clientSecret); // mask secret in logs
+  core.setSecret(clientSecret);
 
-  let expired = true;
-
-  if (loginResponse && loginResponse.accessToken) {
+  if (loginResponse?.accessToken) {
     try {
       const parts = loginResponse.accessToken.split('.');
       if (parts.length >= 2) {
         const claims = base64UrlDecodeToJson(parts[1]);
-        if (Date.now() < claims.exp * 1000) {
-          expired = false;
-          return loginResponse;
-        }
+        if (Date.now() < claims.exp * 1000) return loginResponse;
       }
     } catch (_) {
-      expired = true;
+      // ignore and re-login
     }
   }
 
-  if (expired) {
-    const url = `${baseUrl}/api/auth/v1/api_keys/login`;
-    core.debug(`Authenticating with ${url}`);
+  const url = `${baseUrl}/api/auth/v1/api_keys/login`;
+  const resp = await axios.post(
+    url,
+    { clientId, secret: clientSecret },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
 
-    const resp = await axios.post(
-      url,
-      { clientId, secret: clientSecret },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
-
-    loginResponse = resp.data;
-    if (!loginResponse || !loginResponse.accessToken) {
-      throw new Error(`Login response missing accessToken: ${JSON.stringify(resp.data)}`);
-    }
-
-    core.setSecret(loginResponse.accessToken);
-    core.info('Authentication successful');
-    return loginResponse;
+  loginResponse = resp.data;
+  if (!loginResponse?.accessToken) {
+    throw new Error(`Login response missing accessToken: ${JSON.stringify(resp.data)}`);
   }
+
+  core.setSecret(loginResponse.accessToken);
+  core.info('Authentication successful');
+  return loginResponse;
 }
 
 /* =========================
- * Utilities
+ * Files
  * ========================= */
 async function getMatchingFiles(pattern) {
   const files = await glob.glob(pattern);
-
-  if (files.length === 0) {
-    throw new Error(`No files found matching pattern: ${pattern}`);
-  }
+  if (files.length === 0) throw new Error(`No files found matching pattern: ${pattern}`);
   if (files.length > MAX_FILES) {
     throw new Error(`Pattern matched ${files.length} files, exceeds max ${MAX_FILES}. Narrow the pattern.`);
   }
-
   return files;
 }
 
 /* =========================
- * Team lookup (zScan-style)
+ * Team / Group resolution
  * ========================= */
 async function getTeams() {
   const auth = await loginHttpRequest();
-  const resp = await axios.get(
-    `${baseUrl}/api/auth/public/v1/teams`,
-    { headers: { Authorization: `Bearer ${auth.accessToken}` } }
-  );
+  const resp = await axios.get(`${baseUrl}/api/auth/public/v1/teams`, {
+    headers: { Authorization: `Bearer ${auth.accessToken}` }
+  });
   return resp.data.content;
 }
 
-async function resolveTeamId(teamNameArg) {
+async function resolveTeamId(name) {
   const teams = await getTeams();
-  const match = teams.find(t => t.name === teamNameArg);
-
-  if (!match) {
-    const names = teams.map(t => t.name).join(', ');
-    throw new Error(`Team "${teamNameArg}" not found. Available teams: ${names}`);
-  }
-
-  core.info(`Resolved team "${teamNameArg}" -> ${match.id}`);
-  return match.id;
+  const t = teams.find((x) => x.name === name);
+  if (!t) throw new Error(`Team "${name}" not found. Available teams: ${teams.map(x => x.name).join(', ')}`);
+  core.info(`Resolved team "${name}" -> ${t.id}`);
+  return t.id;
 }
 
-/* =========================
- * Group lookup (team-scoped > global)
- * ========================= */
 async function getGroups() {
   const auth = await loginHttpRequest();
-  const resp = await axios.get(
-    `${baseUrl}/api/mtd-policy/public/v1/groups`,
-    { headers: { Authorization: `Bearer ${auth.accessToken}` } }
-  );
+  const resp = await axios.get(`${baseUrl}/api/mtd-policy/public/v1/groups`, {
+    headers: { Authorization: `Bearer ${auth.accessToken}` }
+  });
   return resp.data;
 }
 
-async function resolveGroupId(groupNameArg, teamId) {
+async function resolveGroupId(name, teamId) {
   const groups = await getGroups();
-  const matches = groups.filter(g => g.name === groupNameArg);
-
+  const matches = groups.filter((g) => g.name === name);
   if (matches.length === 0) {
-    const names = groups.map(g => g.name).join(', ');
-    throw new Error(`Group "${groupNameArg}" not found. Visible groups: ${names}`);
+    throw new Error(`Group "${name}" not found. Visible groups: ${groups.map(g => g.name).join(', ')}`);
   }
 
-  const teamScoped = matches.filter(g => g.team && g.team.id === teamId);
+  const teamScoped = matches.filter((g) => g.team?.id === teamId);
   if (teamScoped.length === 1) {
-    core.info(`Resolved team-scoped group "${groupNameArg}" -> ${teamScoped[0].id}`);
+    core.info(`Resolved team-scoped group "${name}" -> ${teamScoped[0].id}`);
     return teamScoped[0].id;
   }
-  if (teamScoped.length > 1) {
-    throw new Error(`Group "${groupNameArg}" is ambiguous within team ${teamId}.`);
-  }
+  if (teamScoped.length > 1) throw new Error(`Group "${name}" is ambiguous within team ${teamId}.`);
 
-  const global = matches.filter(g => !g.team);
+  const global = matches.filter((g) => !g.team);
   if (global.length === 1) {
-    core.info(`Resolved global group "${groupNameArg}" -> ${global[0].id}`);
+    core.info(`Resolved global group "${name}" -> ${global[0].id}`);
     return global[0].id;
   }
-  if (global.length > 1) {
-    throw new Error(`Multiple global groups named "${groupNameArg}" found.`);
-  }
+  if (global.length > 1) throw new Error(`Multiple global groups named "${name}" found.`);
 
-  throw new Error(`Group "${groupNameArg}" exists but is not accessible for team ${teamId}.`);
+  throw new Error(`Group "${name}" exists but is not accessible for team ${teamId}.`);
 }
 
 /* =========================
- * Protection request builder
+ * Protection request
  * ========================= */
 function buildProtectionRequest(teamId, groupId) {
   let req;
-
   if (protectionJsonFile) {
-    req = JSON.parse(fs.readFileSync(ensureAbsoluteWorkspacePath(protectionJsonFile), 'utf8'));
+    req = JSON.parse(fs.readFileSync(ensureAbs(protectionJsonFile), 'utf8'));
   } else if (protectionJsonInline) {
     req = JSON.parse(protectionJsonInline);
   } else {
@@ -44712,7 +44676,7 @@ function buildProtectionRequest(teamId, groupId) {
 }
 
 /* =========================
- * Submit protect job
+ * Protect + Poll
  * ========================= */
 async function submitProtect(filePath, protectionRequest) {
   const auth = await loginHttpRequest();
@@ -44721,89 +44685,65 @@ async function submitProtect(filePath, protectionRequest) {
   form.append('file', fs.createReadStream(filePath));
   form.append('appProtectionRequest', JSON.stringify(protectionRequest), { contentType: 'application/json' });
 
-  const resp = await axios.post(
-    `${baseUrl}/api/zapp/public/v1/builds/protect`,
-    form,
-    {
-      headers: {
-        ...form.getHeaders(),
-        Authorization: `Bearer ${auth.accessToken}`
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
-    }
-  );
+  const resp = await axios.post(`${baseUrl}/api/zapp/public/v1/builds/protect`, form, {
+    headers: { ...form.getHeaders(), Authorization: `Bearer ${auth.accessToken}` },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity
+  });
 
   return resp.data;
 }
 
-/* =========================
- * Poll build
- * ========================= */
 async function getBuild(buildId) {
   const auth = await loginHttpRequest();
-  const resp = await axios.get(
-    `${baseUrl}/api/zapp/public/v1/builds/${buildId}`,
-    { headers: { Authorization: `Bearer ${auth.accessToken}` } }
-  );
+  const resp = await axios.get(`${baseUrl}/api/zapp/public/v1/builds/${buildId}`, {
+    headers: { Authorization: `Bearer ${auth.accessToken}` }
+  });
   return resp.data;
 }
 
-async function pollUntilProtected(buildId) {
+async function pollUntilReady(buildId) {
   const start = Date.now();
-
   while (Date.now() - start < MAX_POLL_TIME) {
-    const build = await getBuild(buildId);
+    const b = await getBuild(buildId);
+    core.info(`${new Date().toISOString()} - state=${b.state} protectedUrl=${b.protectedUrl ? 'present' : 'null'}`);
 
-    core.info(`${new Date().toISOString()} - state=${build.state} protectedUrl=${build.protectedUrl ? 'present' : 'null'}`);
-
-    if (build.protectedUrl) {
-      return build;
-    }
-
-    if (build.state === 'FAILED' || build.state === 'ERROR') {
-      throw new Error(`zShield build failed: ${JSON.stringify(build)}`);
-    }
+    if (b.protectedUrl) return b;
+    if (b.state === 'FAILED' || b.state === 'ERROR') throw new Error(`zShield build failed: ${JSON.stringify(b)}`);
 
     await sleep(STATUS_POLL_TIME);
   }
-
   throw new Error(`Timed out waiting for protected artifact after ${timeoutMinutes} minutes.`);
 }
 
 /* =========================
- * Download protected file
+ * Signed URL + Download
  * ========================= */
 async function getProtectedLink(buildId) {
   const auth = await loginHttpRequest();
   const url = `${baseUrl}/api/zapp/public/v1/builds/${buildId}/protected`;
 
   const resp = await axios.get(url, {
-    headers: {
-      Authorization: `Bearer ${auth.accessToken}`,
-      Accept: 'application/json'
-    }
+    headers: { Authorization: `Bearer ${auth.accessToken}`, Accept: 'application/json' }
   });
 
-  // Expect { name, url }
-  if (!resp.data || !resp.data.url) {
-    throw new Error(`Unexpected /protected response: ${JSON.stringify(resp.data)}`);
-  }
-
+  if (!resp.data?.url) throw new Error(`Unexpected /protected response: ${JSON.stringify(resp.data)}`);
   return resp.data; // { name, url }
 }
 
-async function downloadFromSignedUrl(signedUrl, inputFile) {
+async function downloadFromSignedUrl(signedUrl, inputFile, serverName) {
   const baseName = path.basename(inputFile, path.extname(inputFile));
-  const outPath = outputFileInput || `${baseName}_zshield_protected.apk`;
+  const fallback = `${baseName}_zshield_protected.apk`;
+  const finalName = sanitizeFilename(serverName, fallback);
+  const outPath = outputFileInput ? sanitizeFilename(outputFileInput, fallback) : finalName;
 
   core.info(`Downloading protected artifact to ${outPath}...`);
   core.info(`Signed URL (sanitized): ${safeUrlSummary(signedUrl)}`);
 
   const resp = await axios.get(signedUrl, {
     responseType: 'stream',
-    maxRedirects: 10, // behave like curl -L
-    proxy: false,     // avoid runner proxy rewriting signed URL traffic
+    maxRedirects: 10,
+    proxy: false,
     headers: { Accept: '*/*' },
     validateStatus: () => true
   });
@@ -44815,19 +44755,17 @@ async function downloadFromSignedUrl(signedUrl, inputFile) {
   core.info(`Download response: status=${resp.status} content-type="${ct}" content-length="${cl}"`);
   core.info(`Final URL (sanitized): ${safeUrlSummary(finalUrl)}`);
 
-  // Fail and surface body snippet on non-2xx
   if (resp.status < 200 || resp.status >= 300) {
-    const snippet = await readStreamSnippet(resp.data, 1600);
+    const snippet = await readStreamSnippet(resp.data);
     throw new Error(`Signed URL download failed HTTP ${resp.status}. Body starts:\n${snippet}`);
   }
 
-  // If server says it's HTML/XML, surface it
+  // Content-type can be octet-stream for APK; only hard-fail on obvious markup.
   if (ct.includes('text/html') || ct.includes('application/xml') || ct.includes('text/xml')) {
-    const snippet = await readStreamSnippet(resp.data, 1600);
+    const snippet = await readStreamSnippet(resp.data);
     throw new Error(`Signed URL returned ${ct}, not APK. Body starts:\n${snippet}`);
   }
 
-  // Stream to disk
   await new Promise((resolve, reject) => {
     const writer = fs.createWriteStream(outPath);
     resp.data.pipe(writer);
@@ -44838,7 +44776,7 @@ async function downloadFromSignedUrl(signedUrl, inputFile) {
   const stats = fs.statSync(outPath);
   core.info(`Download complete: ${outPath} (${stats.size} bytes)`);
 
-  // Minimal sanity: APK is ZIP => "PK" magic
+  // APK is ZIP => "PK"
   const fd = fs.openSync(outPath, 'r');
   const magic = Buffer.alloc(2);
   fs.readSync(fd, magic, 0, 2, 0);
@@ -44848,8 +44786,6 @@ async function downloadFromSignedUrl(signedUrl, inputFile) {
     const head = fs.readFileSync(outPath).slice(0, 800).toString('utf8');
     throw new Error(`Downloaded file is not ZIP/APK (missing PK). First bytes:\n${head}`);
   }
-
-  // If still tiny, dump first bytes (likely an error wrapper)
   if (stats.size < 10000) {
     const head = fs.readFileSync(outPath).slice(0, 1200).toString('utf8');
     throw new Error(`Downloaded file is unexpectedly small (${stats.size} bytes). First bytes:\n${head}`);
@@ -44862,13 +44798,12 @@ async function downloadFromSignedUrl(signedUrl, inputFile) {
  * Main
  * ========================= */
 async function run() {
+  core.debug(`Base URL: ${baseUrl}`);
   core.debug(`app pattern: ${appFilePattern}`);
   core.debug(`team: ${teamName}`);
   core.debug(`group: ${groupName}`);
 
   const files = await getMatchingFiles(appFilePattern);
-
-  // Recommended: enforce exactly one artifact for Pro
   if (files.length !== 1) {
     throw new Error(`app_file must resolve to exactly 1 file for zShield Pro. Matched: ${files.join(', ')}`);
   }
@@ -44884,37 +44819,28 @@ async function run() {
   const submitResp = await submitProtect(file, protectionRequest);
 
   const buildId = submitResp.buildId;
-  if (!buildId) {
-    throw new Error(`Protect response missing buildId: ${JSON.stringify(submitResp)}`);
-  }
+  if (!buildId) throw new Error(`Protect response missing buildId: ${JSON.stringify(submitResp)}`);
 
   core.setOutput('build_id', String(buildId));
 
-  await pollUntilProtected(buildId);
+  await pollUntilReady(buildId);
 
-  // Per API docs: must fetch signed download URL explicitly
   const link = await getProtectedLink(buildId);
 
-  // Prove what URL we got (without leaking the signature)
   core.info(`Protected artifact name: "${link.name || ''}"`);
   core.info(`Protected artifact signed URL: ${safeUrlSummary(link.url)}`);
 
-  // Optional: expose the signed URL as an output (be careful—contains signature)
-  // If you enable this, consider masking it or only using internally.
-  core.setOutput('protected_url', link.url);
+  // Output: contains temporary signature; don't log it.
   core.setSecret(link.url);
+  core.setOutput('protected_url', link.url);
 
-  // Download the actual APK from the signed URL
-  const protectedPath = await downloadFromSignedUrl(link.url, file);
-
+  const protectedPath = await downloadFromSignedUrl(link.url, file, link.name);
   core.setOutput('protected_file', protectedPath);
 
   core.info('zShield Pro Action Finished');
 }
 
-run().catch((err) => {
-  core.setFailed(formatAxiosError(err));
-});
+run().catch((err) => core.setFailed(formatAxiosError(err)));
 
 module.exports = __webpack_exports__;
 /******/ })()
